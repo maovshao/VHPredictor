@@ -11,14 +11,141 @@ from logzero import logger
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from vhpredictor_util.evaluation import evaluate_metrics, load_ground_truth, read_predicted_probabilities
-from vhpredictor_util.util import load_label_index, load_ic_score, get_virus_name, load_embeddings, make_parent_dir
+from vhpredictor_util.util import load_label_index, load_ic_score, get_virus_name, load_embeddings, make_parent_dir, cos_similarity
 from sklearn import manifold
 import math
 import matplotlib.colors as mcolors
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import silhouette_score
+import matplotlib.patches as patches
+import torch
+import matplotlib.colors as mcolors
 
-def multi_label_analyze(dict_file, plot = False):
+def analyze_data(taxonomy_file, dict_file):
+    """
+    Analyze host taxonomy and virus-host relationships.
+    
+    :param taxonomy_file: Path to the host_taxonomy file
+    :param dict_file: Path to the virus_host_dict file
+    :return: A dictionary containing the statistics of host_taxonomy 
+             and virus_host_dict analysis results.
+    """
+    
+    # 1. Read host_taxonomy and determine the deepest level of each host
+    host_deepest_level = {}  # key: host, value: deepest_level
+    # Dictionary to count the number of unique hosts at each level in taxonomy
+    taxonomy_level_count = {
+        "strain": 0,
+        "species": 0,
+        "genus": 0,
+        "family": 0,
+        "order": 0,
+        "class": 0,
+        "phylum": 0,
+        "kingdom": 0
+    }
+    
+    with open(taxonomy_file, 'r', encoding='utf-8') as f:
+        # Skip the header line if it exists
+        header = f.readline().strip().split('\t')
+        
+        # Make sure the header has 8 columns (host, species, genus, family, order, class, phylum, kingdom)
+        # If your file doesn't have a header or the structure is different, adjust accordingly
+        
+        for line in f:
+            parts = line.strip().split('\t')
+            if len(parts) < 8:
+                continue  # skip malformed lines
+            
+            host, sp, ge, fa, od, cl, ph, ki = parts
+            
+            # Determine the deepest level according to the rules:
+            # 1) If all from species to kingdom are "_", deepest level -> "Kingdom"
+            # 2) If none are "_", and host == species, deepest level -> "species"
+            # 3) If none are "_", and host != species, deepest level -> "strain"
+            # 4) Otherwise, find the first from left to right that is not "_"
+            
+            taxonomy_list = [sp, ge, fa, od, cl, ph, ki]
+            if all(x == "_" for x in taxonomy_list):
+                deepest = "kingdom"
+            elif sp != "_":
+                if host == sp:
+                    deepest = "species"
+                else:
+                    deepest = "strain"
+            else:
+                # Find the first level (from species to kingdom) that is not "_"
+                # and use that as the deepest level.
+                level_names = ["species", "genus", "family", "order", "class", "phylum", "kingdom"]
+                for value, level_name in zip(taxonomy_list, level_names):
+                    if value != "_":
+                        deepest = level_name
+                        break
+            
+            host_deepest_level[host] = deepest
+    
+    # Count unique hosts in host_taxonomy
+    total_unique_host_in_taxonomy = len(host_deepest_level)
+    
+    # Count each level (for unique hosts)
+    for host, level in host_deepest_level.items():
+        taxonomy_level_count[level] += 1
+    
+    # 2. Read virus_host_dict to gather all hosts (with possible duplicates)
+    all_hosts_in_dict = []  # store every host from dict_file (including duplicates)
+    
+    with open(dict_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            # virus = parts[0]  # virus name (not used here)
+            # the rest are hosts
+            if len(parts) < 2:
+                continue
+            hosts = parts[1:]
+            for h in hosts:
+                all_hosts_in_dict.append(h)
+    
+    # For each host in all_hosts_in_dict, we need its deepest level from host_taxonomy
+    # If it's not found in host_taxonomy, we can ignore or treat as unknown.
+    dict_level_count = {
+        "strain": 0,
+        "species": 0,
+        "genus": 0,
+        "family": 0,
+        "order": 0,
+        "class": 0,
+        "phylum": 0,
+        "kingdom": 0
+    }
+    
+    total_hosts_in_dict = len(all_hosts_in_dict)  # count including duplicates
+    
+    for h in all_hosts_in_dict:
+        if h in host_deepest_level:
+            level = host_deepest_level[h]
+            dict_level_count[level] += 1
+        else:
+            # If the host does not exist in host_taxonomy, ignore or mark as unknown.
+            # Here we choose to ignore.
+            pass
+    
+    # 3. Prepare final stats
+    result = {
+        # 1) host_taxonomy results
+        "taxonomy_total_unique_hosts": total_unique_host_in_taxonomy,
+        "taxonomy_level_count": dict(taxonomy_level_count),
+        
+        # 2) virus_host_dict results
+        "dict_total_hosts_including_duplicates": total_hosts_in_dict,
+        "dict_level_count": dict(dict_level_count)
+    }
+    
+    return result
+
+def multi_label_analyze(dict_file):
     plt.rcParams.update(plt.rcParamsDefault)
     host_dict = {}  # List to store number of host per virus
     virus_dict = {}  # Dictionary to store number of viruses per host
@@ -40,58 +167,90 @@ def multi_label_analyze(dict_file, plot = False):
 
     # Print results
     print(f"Total number of unique host: {len(virus_dict)}")
-
-    if plot:
-        virus_num = len(host_dict)
-        host_num_dic = {}
-        for virus in host_dict:
-            host_num_dic[virus] = len(host_dict[virus])
-        host_num_dic = dict(sorted(host_num_dic.items(), key=lambda item: item[1], reverse=True))
-        host_num_array = np.asarray(list(host_num_dic.values()))
-        max_host_num = np.max(host_num_array)
-
-        # make data:
-        x = 0.5 + np.arange(virus_num)
-
-        # plot
-        fig, ax = plt.subplots()
-        ax.bar(x, host_num_array, width=1, linewidth=0)
-        ax.set_xlabel('Virus list', fontsize=18)
-        ax.set_ylabel('Number of host', fontsize=18)
-        plt.yscale('log')
-        plt.xticks(fontsize=15)
-        plt.yticks(fontsize=15)
-        ax.set(xlim=(0, virus_num), ylim=(0.9, 10**(int(np.log10(max_host_num))+1)), yticks=10**np.arange(0, (int(np.log10(max_host_num))+1)))
-        ax.set_xticklabels(['{:,}'.format(int(label)) for label in ax.get_xticks()])
-
-        plt.show()
-        plt.close()
-
-        host_num = len(virus_dict)
-        virus_num_dic = {}
-        for host in virus_dict:
-            virus_num_dic[host] = len(virus_dict[host])
-        virus_num_dic = dict(sorted(virus_num_dic.items(), key=lambda item: item[1], reverse=True))
-        virus_num_array = np.asarray(list(virus_num_dic.values()))
-        max_virus_num = np.max(virus_num_array)
-
-        # make data:
-        x = 0.5 + np.arange(host_num)
-
-        # plot
-        fig, ax = plt.subplots()
-        ax.bar(x, virus_num_array, width=1, linewidth=0)
-        ax.set_xlabel('host list', fontsize=18)
-        ax.set_ylabel('Number of annotated virus', fontsize=18)
-        plt.yscale('log')
-        plt.xticks(fontsize=15)
-        plt.yticks(fontsize=15)
-        ax.set(xlim=(0, host_num), ylim=(0.9, 10**(int(np.log10(max_virus_num))+1)), yticks=10**np.arange(0, (int(np.log10(max_virus_num))+1)))
-        ax.set_xticklabels(['{:,}'.format(int(label)) for label in ax.get_xticks()])
-
-        plt.show()
-        plt.close()
     return virus_dict
+
+def analyze_and_plot_top_k_probabilities(input_file: str, k: int = 10):
+    """
+    Read the tab-separated file with columns: virus_name, host_name, probability.
+    Calculate the average probability for the top-n ranks (1 to k) for each virus,
+    and plot them using seaborn as both a bar plot and a line plot.
+    
+    Parameters:
+    -----------
+    input_file : str
+        The path to the input file.
+    k : int
+        The number of top ranks to calculate. Default is 10.
+        
+    Returns:
+    --------
+    None
+        The function will display a plot of the average probabilities for top-n.
+    """
+    
+    # 1) Read data
+    df = pd.read_csv(input_file, sep='\t', header=None, names=['virus_name', 'host_name', 'probability'])
+    
+    # 2) Group by 'virus_name'
+    grouped = df.groupby('virus_name')
+    
+    # 3) For each virus, store the top-k probabilities in a list
+    top_k_probs_list = []
+    for virus_name, group_df in grouped:
+        group_df = group_df.reset_index(drop=True)
+        num_records = len(group_df)
+        
+        top_k_probs = []
+        for i in range(k):
+            if i < num_records:
+                top_k_probs.append(group_df.loc[i, 'probability'])
+            else:
+                top_k_probs.append(None)
+        
+        top_k_probs_list.append(top_k_probs)
+    
+    # 4) Calculate the average for each rank across all viruses
+    top_k_probs_df = pd.DataFrame(top_k_probs_list).T
+    avg_probs = top_k_probs_df.mean(axis=1, skipna=True).values
+    
+    # 5) Prepare data for plotting
+    rank_labels = [f"Top{i+1}" for i in range(k)]
+    plot_data = pd.DataFrame({
+        'rank': rank_labels,
+        'average_probability': avg_probs
+    })
+    
+    # 6) Plot using Seaborn
+    plt.figure(figsize=(10, 6))
+    
+    # Barplot (we keep the legend label here)
+    sns.barplot(
+        data=plot_data, 
+        x='rank', 
+        y='average_probability', 
+        color='skyblue', 
+        label='Average Probability'
+    )
+    
+    # Lineplot (set legend=False or label=None to remove line's legend)
+    sns.lineplot(
+        data=plot_data, 
+        x='rank', 
+        y='average_probability', 
+        color='red', 
+        marker='o', 
+        legend=False
+    )
+    
+    #plt.title(f'Average Probability of Top-1 to Top-{k} Rankings')
+    plt.xlabel('Ranking', fontsize=18)
+    plt.ylabel('Average Probability', fontsize=18)
+    plt.xticks(fontsize=18)
+    plt.yticks(fontsize=18)
+    
+    plt.legend(fontsize=18)
+    plt.tight_layout()
+    plt.show()
 
 def fmax_aupr_smin_plot_simple(df_dict, color_dict, legend):
     """
@@ -455,7 +614,6 @@ def fmax_aupr_smin_plot(fmax_aupr_smin_plot_dict):
     # We only need one legend entry per method, so let's use bars_fmax for legend entries
     ax1.legend([b[0] for b in bars_fmax], methods, bbox_to_anchor=(1.1, 1), loc='upper left', fontsize=14)
 
-    plt.title('Fmax and Smin Comparison', fontsize=18)
     plt.show()
     plt.close()
 
@@ -468,7 +626,6 @@ def fmax_aupr_smin_plot(fmax_aupr_smin_plot_dict):
 
     ax.set_xlabel('Recall', fontsize=18)
     ax.set_ylabel('Precision', fontsize=18)
-    ax.set_title('Precision-Recall Curve', fontsize=18)
     ax.legend(fontsize=10, loc='upper right')
     plt.xticks(fontsize=18)
     plt.yticks(fontsize=18)
@@ -637,22 +794,34 @@ def create_tsne_plot(embedding_path, classification_path, title, figure_path):
     plt.show()
     plt.close()
 
-def create_violinplot_plot(virus_host_dict_path, virusprotein_host_dict_path):
+def create_statistics_plot(virus_host_dict_path, virusprotein_host_dict_path):
     """
-    Reads virus-host and virusprotein-host dictionaries, counts the number of hosts and
-    virus proteins per virus, generates violin plots for each distribution, and
-    calculates and outputs the mean, maximum values, and the virus_name corresponding 
-    to the maximum values for each dataset. Additionally, generates violin plots
-    excluding the top 5% of data to remove outliers.
+    Reads virus-host and virusprotein-host dictionaries, counts:
+      (1) the number of hosts per virus (virus_host_counts)
+      (2) the number of viruses per host (host_virus_counts)
+      (3) the number of Virus list (virus_protein_counts)
+
+    Generates violin plots for each distribution, and calculates and outputs the mean, 
+    maximum values, and the corresponding keys (virus/host name) for the maximum values 
+    in each dataset. Additionally, generates violin plots excluding the top 5% of data 
+    to remove outliers.
     
+    After that, integrates bar plots (in log scale) for each distribution (Virus-Host,
+    Host-Virus, Virus-Protein) with the same color schemes (skyblue, lightcoral, lightgreen).
+
     Parameters:
         virus_host_dict_path (str): Path to the virus_host_dict file.
         virusprotein_host_dict_path (str): Path to the virusprotein_host_dict file.
     """
+
+    # Restore matplotlib default parameters
     plt.rcParams.update(plt.rcParamsDefault)
-    
-    # Step 1: Read virus_host_dict and count host names per virus
+
+    # Step 1: Read virus_host_dict and count Virus list,
+    #         and also count viruses per host.
     virus_host_counts = {}
+    host_virus_counts = defaultdict(int)  # Dictionary for host->number of viruses
+
     try:
         with open(virus_host_dict_path, 'r') as f:
             for line in f:
@@ -661,7 +830,14 @@ def create_violinplot_plot(virus_host_dict_path, virusprotein_host_dict_path):
                     continue  # Skip empty lines
                 virus_name = columns[0]
                 host_names = columns[1:]
+
+                # Count Virus list
                 virus_host_counts[virus_name] = len(host_names)
+
+                # Count viruses per host
+                for host_name in host_names:
+                    host_virus_counts[host_name] += 1
+
     except FileNotFoundError:
         print(f"File not found: {virus_host_dict_path}")
         return
@@ -669,10 +845,10 @@ def create_violinplot_plot(virus_host_dict_path, virusprotein_host_dict_path):
         print(f"Error reading {virus_host_dict_path}: {e}")
         return
 
-    # Step 2: Read virusprotein_host_dict and count virus proteins per virus
+    # Step 2: Read virusprotein_host_dict and count Virus list
     # Initialize counts with zero for all virus_names in virus_host_counts
     virus_protein_counts = {virus_name: 0 for virus_name in virus_host_counts}
-    
+
     try:
         with open(virusprotein_host_dict_path, 'r') as f:
             for line in f:
@@ -694,63 +870,89 @@ def create_violinplot_plot(virus_host_dict_path, virusprotein_host_dict_path):
         print(f"Error reading {virusprotein_host_dict_path}: {e}")
         return
 
-    # Step 3: Prepare data for plotting
-    # Prepare data for host Names per Virus
+    # Step 3: Prepare data for plotting (virus-host counts, host-virus counts, virus-protein counts).
+
+    # Prepare data for: Virus list
     host_data = {
         'Count': list(virus_host_counts.values()),
-        'Dataset': ['host Names per Virus'] * len(virus_host_counts)
+        'Dataset': ['Virus list'] * len(virus_host_counts)
     }
-    
-    # Prepare data for Virus Proteins per Virus
+
+    # Prepare data for: Virus list
     protein_data = {
         'Count': list(virus_protein_counts.values()),
-        'Dataset': ['Virus Proteins per Virus'] * len(virus_protein_counts)
+        'Dataset': ['Virus list'] * len(virus_protein_counts)
+    }
+
+    # Prepare data for: Host list
+    host_virus_data = {
+        'Count': list(host_virus_counts.values()),
+        'Dataset': ['Host list'] * len(host_virus_counts)
     }
 
     # Step 4: Calculate and Output Statistics
-    # For host Names per Virus
+
     host_mean = statistics.mean(host_data['Count']) if host_data['Count'] else 0
     host_max = max(host_data['Count']) if host_data['Count'] else 0
-    # Find virus_name(s) with the maximum host count
     max_host_viruses = [virus for virus, count in virus_host_counts.items() if count == host_max]
-    
-    print("host Names per Virus:")
+
+    print("Distribution of host list size':")
     print(f"  Mean: {host_mean}")
     print(f"  Maximum: {host_max}")
     print(f"  Virus Name(s) with Maximum hosts: {', '.join(max_host_viruses)}\n")
-    
-    # For Virus Proteins per Virus
+
+    hv_mean = statistics.mean(host_virus_data['Count']) if host_virus_data['Count'] else 0
+    hv_max = max(host_virus_data['Count']) if host_virus_data['Count'] else 0
+    max_hv_hosts = [host for host, count in host_virus_counts.items() if count == hv_max]
+
+    print("Distribution of annotated virus size:")
+    print(f"  Mean: {hv_mean}")
+    print(f"  Maximum: {hv_max}")
+    print(f"  Host Name(s) with Maximum annotated viruses: {', '.join(max_hv_hosts)}\n")
+
     protein_mean = statistics.mean(protein_data['Count']) if protein_data['Count'] else 0
     protein_max = max(protein_data['Count']) if protein_data['Count'] else 0
-    # Find virus_name(s) with the maximum protein count
     max_protein_viruses = [virus for virus, count in virus_protein_counts.items() if count == protein_max]
-    
-    print("Virus Proteins per Virus:")
+
+    print("Distribution of virus protein bag size:")
     print(f"  Mean: {protein_mean}")
     print(f"  Maximum: {protein_max}")
     print(f"  Virus Name(s) with Maximum Proteins: {', '.join(max_protein_viruses)}\n")
-    
-    # Step 5: Plot host Names per Virus Violin Plot
+
+    # Step 5: Plot 1) Virus list Violin Plot
     plt.figure(figsize=(8, 6))
     sns.violinplot(data=host_data, x='Dataset', y='Count', inner='box', color="skyblue")
-    plt.xticks(fontsize=12)
-    plt.ylabel('Number of host Names', fontsize=14)
-    plt.xlabel('')
-    plt.title('Distribution of host Names per Virus', fontsize=16)
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    plt.xlabel('', fontsize=16)
+    plt.ylabel('Host list size', fontsize=16)
+    plt.title('Distribution of host list size', fontsize=16)
     plt.show()
     plt.close()
-    
-    # Step 6: Plot Virus Proteins per Virus Violin Plot
+
+    # Step 6: Plot 2) Host list Violin Plot
+    plt.figure(figsize=(8, 6))
+    sns.violinplot(data=host_virus_data, x='Dataset', y='Count', inner='box', color="lightcoral")
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    plt.xlabel('', fontsize=16)
+    plt.ylabel('Annotated virus size', fontsize=16)
+    plt.title('Distribution of annotated virus size', fontsize=16)
+    plt.show()
+    plt.close()
+
+    # Step 7: Plot 3) Virus list Violin Plot
     plt.figure(figsize=(8, 6))
     sns.violinplot(data=protein_data, x='Dataset', y='Count', inner='box', color="lightgreen")
-    plt.xticks(fontsize=12)
-    plt.ylabel('Number of Virus Proteins', fontsize=14)
-    plt.xlabel('')
-    plt.title('Distribution of Virus Proteins per Virus', fontsize=16)
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    plt.xlabel('', fontsize=16)
+    plt.ylabel('Virus protein bag size', fontsize=16)
+    plt.title('Distribution of virus protein bag size', fontsize=16)
     plt.show()
     plt.close()
-    
-    # Step 7: Filter Data to Exclude Top 5% (95th Percentile) as Outliers
+
+    # Step 8: Filter Data to Exclude Top 5% (95th Percentile) as Outliers
     def filter_top_5_percent(data_list):
         """
         Filters out the top 5% of data based on the 95th percentile.
@@ -769,36 +971,141 @@ def create_violinplot_plot(virus_host_dict_path, virusprotein_host_dict_path):
 
     filtered_host_counts = filter_top_5_percent(host_data['Count'])
     filtered_protein_counts = filter_top_5_percent(protein_data['Count'])
+    filtered_host_virus_counts = filter_top_5_percent(host_virus_data['Count'])
 
-    # Prepare data for plotting filtered host Names per Virus
+    # Prepare data for plotting filtered: Virus list
     filtered_host_data = {
         'Count': filtered_host_counts,
-        'Dataset': ['host Names per Virus'] * len(filtered_host_counts)
-    }
-    
-    # Prepare data for plotting filtered Virus Proteins per Virus
-    filtered_protein_data = {
-        'Count': filtered_protein_counts,
-        'Dataset': ['Virus Proteins per Virus'] * len(filtered_protein_counts)
+        'Dataset': ['Virus list'] * len(filtered_host_counts)
     }
 
-    # Step 8: Plot Filtered host Names per Virus Violin Plot
+    # Prepare data for plotting filtered: Virus list
+    filtered_protein_data = {
+        'Count': filtered_protein_counts,
+        'Dataset': ['Virus list'] * len(filtered_protein_counts)
+    }
+
+    # Prepare data for plotting filtered: Host list
+    filtered_host_virus_data = {
+        'Count': filtered_host_virus_counts,
+        'Dataset': ['Host list'] * len(filtered_host_virus_counts)
+    }
+
+    # Step 9: Plot Filtered Virus list Violin Plot
     plt.figure(figsize=(8, 6))
     sns.violinplot(data=filtered_host_data, x='Dataset', y='Count', inner='box', color="skyblue")
-    plt.xticks(fontsize=12)
-    plt.ylabel('Number of host Names', fontsize=14)
-    plt.xlabel('')
-    plt.title('Distribution of host Names per Virus (≤95th Percentile)', fontsize=16)
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    plt.xlabel('', fontsize=16)
+    plt.ylabel('Host list size', fontsize=16)
+    plt.title('Distribution of host list size (≤95th Percentile)', fontsize=16)
     plt.show()
     plt.close()
-    
-    # Step 9: Plot Filtered Virus Proteins per Virus Violin Plot
+
+    # Step 10: Plot Filtered Viruses per Host Violin Plot
+    plt.figure(figsize=(8, 6))
+    sns.violinplot(data=filtered_host_virus_data, x='Dataset', y='Count', inner='box', color="lightcoral")
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    plt.xlabel('', fontsize=16)
+    plt.ylabel('Annotated virus size', fontsize=16)
+    plt.title('Distribution of annotated virus size (≤95th Percentile)', fontsize=16)
+    plt.show()
+    plt.close()
+
+    # Step 11: Plot Filtered Virus list Violin Plot
     plt.figure(figsize=(8, 6))
     sns.violinplot(data=filtered_protein_data, x='Dataset', y='Count', inner='box', color="lightgreen")
-    plt.xticks(fontsize=12)
-    plt.ylabel('Number of Virus Proteins', fontsize=14)
-    plt.xlabel('')
-    plt.title('Distribution of Virus Proteins per Virus (≤95th Percentile)', fontsize=16)
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    plt.xlabel('', fontsize=16)
+    plt.ylabel('Virus protein bag size', fontsize=16)
+    plt.title('Distribution of virus protein bag size (≤95th Percentile)', fontsize=16)
+    plt.show()
+    plt.close()
+
+    # Step 12: Bar plots for the three distributions in log scale, 
+    #          with the same color scheme as above.
+
+    # Convert the dictionary data to sorted lists for plotting
+    # Virus-Host (Number of hosts per virus)
+    vh_sorted = sorted(virus_host_counts.items(), key=lambda x: x[1], reverse=True)
+    vh_array = np.array([item[1] for item in vh_sorted])
+    x_vh = 0.5 + np.arange(len(vh_array))
+
+    if len(vh_array) > 0:
+        vh_max = vh_array.max()
+    else:
+        vh_max = 1
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(x_vh, vh_array, width=1, linewidth=0, color="skyblue")
+    ax.set_xlabel('Virus list', fontsize=16)
+    ax.set_ylabel('Number of hosts', fontsize=16)
+    plt.yscale('log')
+    y_max_order = int(np.log10(vh_max)) if vh_max > 0 else 0
+    ax.set(
+        xlim=(0, len(vh_array)),
+        ylim=(0.9, 10**(y_max_order+1)),
+        yticks=10**np.arange(0, (y_max_order+1))
+    )
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    ax.set_title('Distribution of host list size (log scale)', fontsize=16)
+    plt.show()
+    plt.close()
+
+    # Host-Virus (Number of viruses per host)
+    hv_sorted = sorted(host_virus_counts.items(), key=lambda x: x[1], reverse=True)
+    hv_array = np.array([item[1] for item in hv_sorted])
+    x_hv = 0.5 + np.arange(len(hv_array))
+
+    if len(hv_array) > 0:
+        hv_max_val = hv_array.max()
+    else:
+        hv_max_val = 1
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(x_hv, hv_array, width=1, linewidth=0, color="lightcoral")
+    ax.set_xlabel('Host list', fontsize=16)
+    ax.set_ylabel('Number of annotated viruses', fontsize=16)
+    plt.yscale('log')
+    y_max_order = int(np.log10(hv_max_val)) if hv_max_val > 0 else 0
+    ax.set(
+        xlim=(0, len(hv_array)),
+        ylim=(0.9, 10**(y_max_order+1)),
+        yticks=10**np.arange(0, (y_max_order+1))
+    )
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    ax.set_title('Distribution of annotated virus size (log scale)', fontsize=16)
+    plt.show()
+    plt.close()
+
+    # Virus-Protein (Number of proteins per virus)
+    vp_sorted = sorted(virus_protein_counts.items(), key=lambda x: x[1], reverse=True)
+    vp_array = np.array([item[1] for item in vp_sorted])
+    x_vp = 0.5 + np.arange(len(vp_array))
+
+    if len(vp_array) > 0:
+        vp_max = vp_array.max()
+    else:
+        vp_max = 1
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(x_vp, vp_array, width=1, linewidth=0, color="lightgreen")
+    ax.set_xlabel('Virus list', fontsize=16)
+    ax.set_ylabel('Virus protein bag size', fontsize=16)
+    plt.yscale('log')
+    y_max_order = int(np.log10(vp_max)) if vp_max > 0 else 0
+    ax.set(
+        xlim=(0, len(vp_array)),
+        ylim=(0.9, 10**(y_max_order+1)),
+        yticks=10**np.arange(0, (y_max_order+1))
+    )
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    ax.set_title('Distribution of virus protein bag size (log scale)', fontsize=16)
     plt.show()
     plt.close()
 
@@ -1199,7 +1506,6 @@ def plot_iphop_result(method_correct_ratio, method_incorrect_ratio):
     ax.set_ylim(0, 1)
 
     # Set font sizes
-    ax.set_title("Correct and Incorrect Ratio", fontsize=14)
     ax.set_xlabel("Method", fontsize=14)
     ax.set_ylabel("Ratio", fontsize=14)
     ax.tick_params(axis='x', labelsize=14)
@@ -1225,7 +1531,7 @@ def host_predict_result_analyze(
     top=10  # parameter for top-k host predictions
 ):
     """
-    Analyze host prediction results and output a confusion matrix for the top 20 hosts.
+    Analyze host prediction results and output a confusion matrix for the top 10 hosts.
 
     Parameters
     ----------
@@ -1357,19 +1663,19 @@ def host_predict_result_analyze(
         return
 
     # --------------------------------------------------------------------------
-    # Confusion Matrix for Top 20 hosts
+    # Confusion Matrix for Top 10 hosts
     # --------------------------------------------------------------------------
-    # 1) Get the top 20 hosts from sorted_items
-    top_20_hosts = [item[0] for item in sorted_items[:20]]
-    top_20_index = {h: i for i, h in enumerate(top_20_hosts)}
+    # 1) Get the top 10 hosts from sorted_items
+    top_10_hosts = [item[0] for item in sorted_items[:10]]
+    top_10_index = {h: i for i, h in enumerate(top_10_hosts)}
 
-    # 2) Initialize the confusion matrix: 20 x 20
-    conf_matrix = np.zeros((20, 20), dtype=int)
+    # 2) Initialize the confusion matrix: 10 x 10
+    conf_matrix = np.zeros((10, 10), dtype=int)
 
     # 3) For each (virus, true_host) in the test set, determine predicted host
-    #    only if 'true_host' is in top 20. Otherwise, we skip it for the 20x20 matrix.
+    #    only if 'true_host' is in top 10. Otherwise, we skip it for the 10x10 matrix.
     for (virus, true_host) in virus_host_test:
-        if true_host not in top_20_index:
+        if true_host not in top_10_index:
             continue
 
         # find the top-k predicted hosts for this virus
@@ -1389,10 +1695,10 @@ def host_predict_result_analyze(
                 # if no predictions available, skip
                 continue
 
-        # if the predicted host is also among top 20, we update the confusion matrix
-        if pred_host in top_20_index:
-            i_true = top_20_index[true_host]
-            i_pred = top_20_index[pred_host]
+        # if the predicted host is also among top 10, we update the confusion matrix
+        if pred_host in top_10_index:
+            i_true = top_10_index[true_host]
+            i_pred = top_10_index[pred_host]
             conf_matrix[i_true, i_pred] += 1
 
     # 4) Plot confusion matrix with seaborn
@@ -1408,11 +1714,11 @@ def host_predict_result_analyze(
         annot=True,
         fmt='d',
         cmap=new_cmap,  # use the custom darker "Blues"
-        xticklabels=top_20_hosts,
-        yticklabels=top_20_hosts
+        xticklabels=top_10_hosts,
+        yticklabels=top_10_hosts
     )
 
-    plt.title("Confusion Matrix (Top 20 hosts)", fontsize=20)
+    plt.title("Confusion Matrix (Top 10 hosts)", fontsize=20)
     plt.tight_layout()
     plt.show()
     plt.close()
@@ -1496,7 +1802,7 @@ def host_predict_result_analyze(
     ax.set_xlim(-0.5, num_hosts)
     ax.set_xticks([num_hosts])
     ax.set_xticklabels([f"{num_hosts}"])
-    ax.set_xlabel("host List", fontsize=20)
+    ax.set_xlabel("Host List", fontsize=20)
 
     sm = plt.cm.ScalarMappable(cmap=new_cmap, norm=norm)
     sm.set_array([])
@@ -1526,7 +1832,7 @@ def host_predict_result_analyze(
         fontsize=18
     )
 
-    ax.set_title("host Label Analysis", fontsize=20)
+    ax.set_title("Host Label Analysis", fontsize=20)
 
     sns.despine(left=False, bottom=False, right=True, top=True)
     ax.tick_params(axis='both', labelsize=18)
@@ -1606,9 +1912,8 @@ def correct_incorrect_control(
         scatter.legend_.remove()
 
     # Set axis labels and title
-    scatter.set_xlabel("Correct Ratio")
-    scatter.set_ylabel("Incorrect Ratio")
-    scatter.set_title("Correct vs. Incorrect Ratio by Threshold")
+    scatter.set_xlabel("Correct Ratio", fontsize=18)
+    scatter.set_ylabel("Incorrect Ratio", fontsize=18)
 
     # Create a colorbar for threshold
     norm = plt.Normalize(min(thresholds_list), max(thresholds_list))
@@ -1617,8 +1922,11 @@ def correct_incorrect_control(
 
     # Important: use fig.colorbar(...) instead of plt.colorbar(...) to fix ValueError
     cbar = fig.colorbar(sm, ax=ax, fraction=0.1, pad=0.1)
-    cbar.set_label("Threshold", fontsize=20)
+    cbar.set_label("Threshold", fontsize=18)
     cbar.ax.tick_params(labelsize=18)
+
+    plt.xticks(fontsize=18)
+    plt.yticks(fontsize=18)
 
     # Show the scatter plot
     plt.show()
@@ -1637,3 +1945,251 @@ def correct_incorrect_control(
         )
         no_answer = 1 - cr - ir
         print(f"Threshold = {t:.1f}: Correct = {cr:.4f}, Incorrect = {ir:.4f}, No_answer = {no_answer:.4f}")
+
+def draw_taxonomy_diagram(host_name, species, genus, family, order, class_, phylum, kingdom):
+    """
+    Draws a one-line hierarchical taxonomy diagram using Matplotlib.
+
+    Parameters
+    ----------
+    host_name : str
+        The host name.
+    species : str
+        Species name.
+    genus : str
+        Genus name.
+    family : str
+        Family name.
+    order : str
+        Order name.
+    class_ : str
+        Class name.
+    phylum : str
+        Phylum name.
+    kingdom : str
+        Kingdom name.
+
+    Returns
+    -------
+    None
+    """
+
+    # Prepare the taxonomy levels from species to kingdom
+    taxonomy_levels = [
+        ("Species", species),
+        ("Genus", genus),
+        ("Family", family),
+        ("Order", order),
+        ("Class", class_),
+        ("Phylum", phylum),
+        ("Kingdom", kingdom),
+    ]
+
+    # Set up the figure size
+    plt.figure(figsize=(30, 2))
+    ax = plt.gca()
+    # Adjust x-limits and y-limits as needed
+    ax.set_xlim(0, 200)
+    ax.set_ylim(0, 5)
+    ax.axis('off')
+
+    # ====================
+    # (1) Draw a rounded rectangle for the "Host"
+    # ====================
+    host_x, host_y = 1, 2
+    host_width, host_height = 0.5 + len(host_name), 0.8
+
+    # Rounded rectangle for the Host box
+    host_box = patches.FancyBboxPatch(
+        (host_x, host_y),
+        width=host_width,
+        height=host_height,
+        boxstyle="round,pad=0.3",
+        edgecolor='black',
+        facecolor='whitesmoke'  # lighter color
+    )
+    ax.add_patch(host_box)
+
+    # Text above the Host box (label)
+    ax.text(
+        host_x + host_width / 2,
+        host_y + host_height + 0.3,
+        "Host",
+        ha='center',
+        va='bottom',
+        fontsize=14,
+        fontweight='bold'
+    )
+
+    # Text in the center of the Host box (host name)
+    ax.text(
+        host_x + host_width / 2,
+        host_y + host_height / 2,
+        host_name,
+        ha='center',
+        va='center',
+        fontsize=14
+    )
+
+    # ====================
+    # (2) Draw the horizontal chain (species -> genus -> family -> ...)
+    # ====================
+    # Start coordinates on the right side of the Host box
+    start_x = host_x + host_width + 2
+    start_y = host_y
+
+    # Lighter/pastel color map for boxes
+    pastel_colors = plt.cm.Pastel1(np.linspace(0, 1, len(taxonomy_levels)))
+
+    # Default heights and gap
+    box_height = 0.8
+    box_gap = 1.8
+
+    # Keep track of previous box center for arrows
+    prev_center_x = None
+    prev_center_y = None
+
+    for i, (level_name, level_value) in enumerate(taxonomy_levels):
+        # Calculate box width dynamically based on text length
+        # We use the longer length between level name and level value
+        max_text_len = max(len(level_name), len(level_value))
+        # Scale factor for each character; adjust as needed
+        # The minimum box width is 3
+        box_width = max(2, 1 * max_text_len)
+
+        # Current x and y coordinates for the box
+        cur_x = start_x
+        cur_y = start_y
+
+        # Draw the box
+        box = patches.FancyBboxPatch(
+            (cur_x, cur_y),
+            width=box_width,
+            height=box_height,
+            boxstyle="round,pad=0.3",
+            edgecolor='black',
+            facecolor=pastel_colors[i]  # Use lighter pastel color
+        )
+        ax.add_patch(box)
+
+        # Text above the box (taxonomy level label)
+        ax.text(
+            cur_x + box_width / 2,
+            cur_y + box_height + 0.3,
+            level_name,
+            ha='center',
+            va='bottom',
+            fontsize=14,
+            fontweight='bold'
+        )
+
+        # Text inside the box (actual taxonomy value)
+        ax.text(
+            cur_x + box_width / 2,
+            cur_y + box_height / 2,
+            level_value,
+            ha='center',
+            va='center',
+            fontsize=14
+        )
+
+        # Draw an arrow from the previous box if this is not the first taxonomy level
+        if i > 0:
+            ax.arrow(
+                prev_center_x,
+                prev_center_y,
+                (cur_x - prev_center_x),
+                0,
+                length_includes_head=True,
+                head_width=0.2,
+                head_length=0.6,
+                fc='k',
+                ec='k'
+            )
+
+        # Update the "previous box center" position
+        prev_center_x = cur_x + box_width
+        prev_center_y = cur_y + box_height / 2
+
+        # Update start_x so that the next box is placed to the right
+        start_x += box_width + box_gap
+
+    plt.tight_layout()
+    plt.show()
+
+
+def analyze_and_visualize(probability_file, taxonomy_file):
+    """
+    Reads two input files and performs the following actions:
+      1) probability_file: No header, three columns [virus_name, host_name, probability]
+      2) taxonomy_file: Has a header, columns [host, species, genus, family, order, class, phylum, kingdom]
+
+    Steps:
+      - For each virus_name, find the row with the maximum probability.
+      - For each host identified with the maximum probability, retrieve its taxonomy information.
+      - Call the custom draw_taxonomy_diagram function to visualize the taxonomy:
+        Host -> species -> genus -> family -> order -> class -> phylum -> kingdom
+
+    Parameters
+    ----------
+    probability_file : str
+        Path to the virus-host probability data file.
+    taxonomy_file : str
+        Path to the host taxonomy data file.
+
+    Returns
+    -------
+    None
+    """
+
+    # 1. Read the probability file (no header, three columns)
+    df_prob = pd.read_csv(
+        probability_file,
+        sep='\t',
+        names=['virus_name', 'host_name', 'probability'],
+        dtype={'virus_name': str, 'host_name': str, 'probability': float}
+    )
+
+    # 2. Group by virus_name and find the row with the maximum probability
+    idx_max = df_prob.groupby('virus_name')['probability'].idxmax()
+    df_max = df_prob.loc[idx_max].reset_index(drop=True)
+
+    print("Highest probability rows for each virus_name:")
+    print(df_max)
+    print("")
+
+    # 3. Read the taxonomy file
+    df_tax = pd.read_csv(taxonomy_file, sep='\t', dtype=str).fillna("_")
+
+    # 4. For each virus-host pair with the highest probability, retrieve taxonomy and visualize
+    for idx, row in df_max.iterrows():
+        virus_name = row['virus_name']
+        host_name = row['host_name']
+        probability = row['probability']
+
+        taxonomy_info = df_tax[df_tax['host'] == host_name]
+        if taxonomy_info.empty:
+            print(f"[WARNING] Host '{host_name}' not found in taxonomy file. Skipping.")
+            continue
+
+        taxonomy_info = taxonomy_info.iloc[0]
+        species = taxonomy_info['species']
+        genus = taxonomy_info['genus']
+        family = taxonomy_info['family']
+        order = taxonomy_info['order']
+        class_ = taxonomy_info['class']
+        phylum = taxonomy_info['phylum']
+        kingdom = taxonomy_info['kingdom']
+
+        # Print summary
+        print(f"Index: {idx}")
+        print(f"Virus: {virus_name}")
+        print(f"Top host: {host_name} (probability = {probability})")
+        print(f"Taxonomy: [Species: {species} -> Genus: {genus} -> Family: {family} -> "
+              f"Order: {order} -> Class: {class_} -> Phylum: {phylum} -> Kingdom: {kingdom}]")
+        print("")
+
+        # Draw the taxonomy diagram
+        draw_taxonomy_diagram(
+            host_name, species, genus, family, order, class_, phylum, kingdom
+        )

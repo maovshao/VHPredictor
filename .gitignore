@@ -1,0 +1,14 @@
+# Folders #
+###########
+**/__pycache__/
+**/.ipynb_checkpoints/
+.vscode/
+vhpredictor_data/
+zto_remove/
+wandb/
+experiment.py
+example.py
+
+# Junk #
+########
+.DS_Store*

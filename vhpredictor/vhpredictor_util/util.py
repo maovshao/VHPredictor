@@ -1,4 +1,5 @@
 import os
+import torch
 import json
 import pickle
 import numpy as np
@@ -149,3 +150,24 @@ def load_embeddings(embedding_path):
         embeddings = pickle.load(handle)
     logger.info(f'Embeddings Loaded from {embedding_path}.')
     return embeddings
+
+def cos_similarity(z1, z2):
+    """
+    Compute cosine similarity between all rows of z1 and all rows of z2.
+
+    Parameters
+    ----------
+    z1 : torch.Tensor, shape [N, dim]
+    z2 : torch.Tensor, shape [M, dim]
+
+    Returns
+    -------
+    sim_mt : torch.Tensor, shape [N, M]
+        The matrix of cosine similarities, value in [-1, 1]
+    """
+    eps = 1e-8
+    z1_n, z2_n = z1.norm(dim=1)[:, None], z2.norm(dim=1)[:, None]
+    z1_norm = z1 / torch.max(z1_n, eps * torch.ones_like(z1_n))
+    z2_norm = z2 / torch.max(z2_n, eps * torch.ones_like(z2_n))
+    sim_mt = torch.mm(z1_norm, z2_norm.transpose(0, 1))
+    return sim_mt
