@@ -896,7 +896,7 @@ def create_statistics_plot(virus_host_dict_path, virusprotein_host_dict_path):
     host_max = max(host_data['Count']) if host_data['Count'] else 0
     max_host_viruses = [virus for virus, count in virus_host_counts.items() if count == host_max]
 
-    print("Distribution of host list size':")
+    print("Distribution of host list size:")
     print(f"  Mean: {host_mean}")
     print(f"  Maximum: {host_max}")
     print(f"  Virus Name(s) with Maximum hosts: {', '.join(max_host_viruses)}\n")
