@@ -21,6 +21,10 @@ import matplotlib.patches as patches
 import torch
 import matplotlib.colors as mcolors
 
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 def analyze_data(taxonomy_file, dict_file):
     """
     Analyze host taxonomy and virus-host relationships.
@@ -251,8 +255,9 @@ def analyze_and_plot_top_k_probabilities(input_file: str, k: int = 10):
     plt.legend(fontsize=18)
     plt.tight_layout()
     plt.show()
+    plt.close()
 
-def fmax_aupr_smin_plot_simple(df_dict, color_dict, legend):
+def fmax_aupr_smin_plot_simple(df_dict, legend):
     """
     Plot a bar chart where 'Fmax' and 'AUPR' share the left y-axis,
     and 'Smin' is on a separate right y-axis. Both plots share the same x-axis
@@ -262,8 +267,6 @@ def fmax_aupr_smin_plot_simple(df_dict, color_dict, legend):
     ----------
     df_dict : pd.DataFrame
         A DataFrame containing columns 'metric', 'score', 'method'.
-    color_dict : dict
-        Dictionary mapping method names to their corresponding plot colors.
     legend : bool
         Whether to show the legend or not.
 
@@ -295,7 +298,7 @@ def fmax_aupr_smin_plot_simple(df_dict, color_dict, legend):
         x="metric",
         y="score",
         hue="method",
-        palette=list(color_dict.values()),
+        palette="bright",
         ax=ax1,
         order=metrics_order  # ensures x-axis shows Fmax, AUPR, Smin in this order
     )
@@ -308,7 +311,7 @@ def fmax_aupr_smin_plot_simple(df_dict, color_dict, legend):
         x="metric",
         y="score",
         hue="method",
-        palette=list(color_dict.values()),
+        palette="bright",
         ax=ax2,
         order=metrics_order
     )
@@ -1506,8 +1509,8 @@ def plot_iphop_result(method_correct_ratio, method_incorrect_ratio):
     ax.set_ylim(0, 1)
 
     # Set font sizes
-    ax.set_xlabel("Method", fontsize=14)
-    ax.set_ylabel("Ratio", fontsize=14)
+    #ax.set_xlabel("Method", fontsize=14)
+    ax.set_ylabel("Fraction", fontsize=14)
     ax.tick_params(axis='x', labelsize=14)
     ax.tick_params(axis='y', labelsize=14)
 
@@ -1709,14 +1712,21 @@ def host_predict_result_analyze(
     colors = [original_cmap(0.3 + 0.7 * i / 255) for i in range(256)]
     new_cmap = mcolors.ListedColormap(colors)
 
-    sns.heatmap(
+    ax = sns.heatmap(
         conf_matrix,
         annot=True,
         fmt='d',
         cmap=new_cmap,  # use the custom darker "Blues"
         xticklabels=top_10_hosts,
-        yticklabels=top_10_hosts
+        yticklabels=top_10_hosts,
+        annot_kws={'size': 16}
     )
+
+    cbar = ax.collections[0].colorbar  
+    cbar.ax.tick_params(labelsize=13)
+
+    plt.xticks(fontsize=13)
+    plt.yticks(fontsize=13)
 
     plt.title("Confusion Matrix (Top 10 hosts)", fontsize=20)
     plt.tight_layout()
@@ -1912,8 +1922,8 @@ def correct_incorrect_control(
         scatter.legend_.remove()
 
     # Set axis labels and title
-    scatter.set_xlabel("Correct Ratio", fontsize=18)
-    scatter.set_ylabel("Incorrect Ratio", fontsize=18)
+    scatter.set_xlabel("Correct Fraction", fontsize=18)
+    scatter.set_ylabel("Incorrect Fraction", fontsize=18)
 
     # Create a colorbar for threshold
     norm = plt.Normalize(min(thresholds_list), max(thresholds_list))
